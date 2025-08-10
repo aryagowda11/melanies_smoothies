@@ -1,5 +1,6 @@
 # Import Python packages
 import streamlit as st
+from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.functions import col
 import requests
 
@@ -11,16 +12,15 @@ st.write("Choose the fruits you want in your custom Smoothie!")
 customer_name = st.text_input("Enter your name for the order:")
 
 # Get Snowflake session and pull fruit options
-cnx = st.connection("snowflake")
-session = cnx.session()
+session = get_active_session()
 
-# Pull both display name and search term from Snowflake
+# Pull both FRUIT_NAME (display) and SEARCH_ON (API term)
 my_dataframe = session.table("smoothies.public.fruit_options").select(
     col('FRUIT_NAME'),
     col('SEARCH_ON')
 )
 
-# Collect into Python lists and lookup dictionary
+# Convert Snowpark DataFrame to Python structures
 rows = my_dataframe.collect()
 fruit_display_list = [row.FRUIT_NAME for row in rows]
 search_lookup = {row.FRUIT_NAME: row.SEARCH_ON for row in rows}
@@ -35,6 +35,7 @@ ingredients_list = st.multiselect(
 # Order submission section
 if ingredients_list and customer_name:
     ingredients_string = ' '.join(ingredients_list)
+
     my_insert_stmt = f"""
         INSERT INTO smoothies.public.orders (ingredients, name_on_order)
         VALUES ('{ingredients_string}', '{customer_name}')
@@ -52,14 +53,12 @@ elif ingredients_list and not customer_name:
 # Nutrition info display section
 if ingredients_list:
     for fruit_display_name in ingredients_list:
-        # Use SEARCH_ON value for API, fallback to display name if missing
+        # Use SEARCH_ON value for API, fallback to FRUIT_NAME if missing
         search_term = search_lookup.get(fruit_display_name, fruit_display_name)
 
         st.subheader(f"{fruit_display_name} Nutrition Information")
 
-        # Call SmoothieFroot API
         response = requests.get(f"https://my.smoothiefroot.com/api/fruit/{search_term.lower()}")
-
         if response.status_code == 200:
             st.dataframe(data=response.json(), use_container_width=True)
         else:
