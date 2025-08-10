@@ -1,6 +1,5 @@
 # Import Python packages
 import streamlit as st
-from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.functions import col  # 👈 Keep imports together
 
 # App title and description
@@ -11,7 +10,8 @@ st.write("Choose the fruits you want in your custom Smoothie!")
 customer_name = st.text_input("Enter your name for the order:")
 
 # Get Snowflake session and pull fruit options
-session = get_active_session()
+cnx=st.connection("snowflake")
+session = cnx.session()
 my_dataframe = session.table("smoothies.public.fruit_options").select(col('FRUIT_NAME'))
 
 # Create multiselect widget for ingredients
