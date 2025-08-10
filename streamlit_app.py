@@ -41,3 +41,9 @@ elif customer_name and not ingredients_list:
     st.info("👆 Choose some ingredients before submitting your order.")
 elif ingredients_list and not customer_name:
     st.info("✍️ Please enter your name before submitting your order.")
+
+# New section to display smoothiefroot nutrition information
+import requests
+smoothiefroot_response = requests.get("https://my.smoothiefroot.com/api/fruit/watermelon")
+# st.text(smoothiefroot_response.json())
+sf_df = st.dataframe(data=smoothiefroot_response.json(), use_container_width=True)
