@@ -1,8 +1,9 @@
-# streamlit_app.py  (Python 3.9 compatible)
+# streamlit_app.py
 
-import streamlit as st
-import pandas as pd
+import re
 import requests
+import pandas as pd
+import streamlit as st
 from snowflake.snowpark.functions import col
 
 # ---------------- App header ----------------
@@ -25,7 +26,7 @@ customer_name = st.text_input("Enter your name for the order:")
 cnx = st.connection("snowflake")
 session = cnx.session()
 
-# ---- quick diagnostics (shown collapsed) ----
+# ---- quick diagnostics (optional) ----
 with st.expander("🔎 Connection diagnostics", expanded=False):
     try:
         ctx = session.sql(
@@ -33,38 +34,75 @@ with st.expander("🔎 Connection diagnostics", expanded=False):
             "current_schema() as schema, current_warehouse() as wh"
         ).collect()[0]
         st.write(dict(ctx))
-        # Check the table & columns exist
         sample = session.sql(
-            "select FRUIT_NAME, SEARCH_ON from SMOOTHIES.PUBLIC.FRUIT_OPTIONS limit 3"
+            "select FRUIT_ID, FRUIT_NAME from SMOOTHIES.PUBLIC.FRUIT_OPTIONS limit 5"
         ).collect()
-        st.write("Sample fruit_options rows:", [dict(r) for r in sample])
+        st.write("Sample FRUIT_OPTIONS rows:", [dict(r) for r in sample])
     except Exception as e:
-        st.warning(f"Diagnostics couldn't read fruit_options: {e}")
+        st.warning(f"Diagnostics couldn't read FRUIT_OPTIONS: {e}")
 
-# ---------------- Fruit options + search key lookup ----------------
-# Expect table: SMOOTHIES.PUBLIC.FRUIT_OPTIONS with columns:
-#   FRUIT_NAME (string), SEARCH_ON (string)
+# ---------------- Fetch fruit options ----------------
+# Table: SMOOTHIES.PUBLIC.FRUIT_OPTIONS (FRUIT_ID, FRUIT_NAME)
 try:
     fruit_rows = (
         session.table("SMOOTHIES.PUBLIC.FRUIT_OPTIONS")
-        .select(col("FRUIT_NAME"), col("SEARCH_ON"))
+        .select(col("FRUIT_ID"), col("FRUIT_NAME"))
         .collect()
     )
 except Exception as e:
     st.error(
         "Failed to read SMOOTHIES.PUBLIC.FRUIT_OPTIONS. "
-        "Verify the table and column names (FRUIT_NAME, SEARCH_ON) and your role/database/schema."
+        "Verify the table/columns and your role/database/schema."
     )
     st.stop()
 
-# Build mapping of display name -> API key (falls back to FRUIT_NAME)
-fruit_lookup = {}
-for r in fruit_rows:
-    fname = r["FRUIT_NAME"]
-    skey = (r["SEARCH_ON"] or "").strip() if r["SEARCH_ON"] is not None else ""
-    fruit_lookup[fname] = skey if skey else fname
+fruit_options = [r["FRUIT_NAME"] for r in fruit_rows]
 
-fruit_options = list(fruit_lookup.keys())
+# ---------------- Helper: derive API key from FRUIT_NAME ----------------
+def derive_api_key(name: str) -> str:
+    """
+    Best-effort mapping to Fruityvice-style names.
+    - lowercase
+    - remove non-letters
+    - handle common plurals (berries, apples, etc.)
+    - map multi-word names to a single token when sensible
+    """
+    n = name.strip().lower()
+
+    # Handle known multi-word cases early
+    known_map = {
+        "dragon fruit": "dragonfruit",
+        "ugli fruit": "ugli",
+        "vanilla fruit": "vanilla",
+        "yerba mate": "yerba",          # likely not supported; best effort
+        "ziziphus jujube": "jujube",    # likely not supported; best effort
+        "cantaloupe": "cantaloupe",
+        "honeydew": "honeydew",
+        "jackfruit": "jackfruit",
+    }
+    if n in known_map:
+        return known_map[n]
+
+    # Normalize to letters and spaces
+    n = re.sub(r"[^a-z\s]", "", n)
+
+    # Take first token for two-word things like "lime" from "lime"
+    tokens = n.split()
+    base = tokens[0] if tokens else n
+
+    # Plural → singular for common cases
+    if base.endswith("ies"):           # berries -> berry
+        base = base[:-3] + "y"
+    elif base.endswith("es") and base[-3:] not in ("ses", "xes"):
+        # apples -> apple, limes -> lime; leave 'ses' like 'oranges' -> 'orange' works too
+        base = base[:-1] if base.endswith("ses") else base[:-1]  # keep simple
+    elif base.endswith("s"):
+        base = base[:-1]
+
+    return base
+
+# Build lookup: displayed fruit -> api key
+fruit_lookup = {name: derive_api_key(name) for name in fruit_options}
 
 # ---------------- Ingredient picker ----------------
 ingredients_list = st.multiselect(
@@ -100,16 +138,16 @@ if st.button("Submit Order"):
         except Exception as e:
             st.error(f"Order failed: {e}")
 
-# ---------------- Nutrition info (uses SEARCH_ON) ----------------
+# ---------------- Nutrition info (derived keys) ----------------
 if ingredients_list:
     st.subheader("Nutrition info")
     records = []
 
     for fruit in ingredients_list:
-        search_on = fruit_lookup.get(fruit, fruit)
+        search_on = fruit_lookup.get(fruit, fruit.lower())
 
         try:
-            # Swap URL if you have your own endpoint
+            # Fruityvice public demo API (supports a limited set of fruits)
             resp = requests.get(
                 f"https://fruityvice.com/api/fruit/{search_on}",
                 timeout=10,
@@ -123,17 +161,16 @@ if ingredients_list:
                 data["search_on"] = search_on
                 records.append(data)
             elif isinstance(data, list) and data:
-                d0 = data[0]
-                if isinstance(d0, dict):
-                    d0["fruit_display"] = fruit
-                    d0["search_on"] = search_on
-                    records.append(d0)
-                else:
-                    records.append(
-                        {"value": d0, "fruit_display": fruit, "search_on": search_on}
-                    )
+                d0 = data[0] if isinstance(data[0], dict) else {"value": data[0]}
+                d0["fruit_display"] = fruit
+                d0["search_on"] = search_on
+                records.append(d0)
+
         except Exception as e:
-            st.warning(f"Could not fetch nutrition for {fruit} ({search_on}): {e}")
+            st.warning(
+                f"Could not fetch nutrition for {fruit} (key: {search_on}). "
+                f"The public API may not support this fruit. Error: {e}"
+            )
 
     if records:
         st.dataframe(pd.json_normalize(records), use_container_width=True)
