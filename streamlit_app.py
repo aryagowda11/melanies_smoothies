@@ -1,65 +1,84 @@
 # Import Python packages
 import streamlit as st
-from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.functions import col
+import pandas as pd
 import requests
 
 # App title and description
 st.title(":cup_with_straw: Customize Your Smoothie :cup_with_straw:")
 st.write("Choose the fruits you want in your custom Smoothie!")
 
-# Add a name input box
+# Name input
 customer_name = st.text_input("Enter your name for the order:")
 
-# Get Snowflake session and pull fruit options
-session = get_active_session()
+# Snowflake connection/session
+cnx = st.connection("snowflake")
+session = cnx.session()
 
-# Pull both FRUIT_NAME (display) and SEARCH_ON (API term)
-my_dataframe = session.table("smoothies.public.fruit_options").select(
-    col('FRUIT_NAME'),
-    col('SEARCH_ON')
+# Fruit options -> list[str]
+fruit_rows = (
+    session.table("smoothies.public.fruit_options")
+    .select(col("FRUIT_NAME"))
+    .collect()
 )
+fruit_options = [r["FRUIT_NAME"] for r in fruit_rows]
 
-# Convert Snowpark DataFrame to Python structures
-rows = my_dataframe.collect()
-fruit_display_list = [row.FRUIT_NAME for row in rows]
-search_lookup = {row.FRUIT_NAME: row.SEARCH_ON for row in rows}
-
-# Multiselect widget for ingredients (display names only)
+# Multiselect (limit 5)
 ingredients_list = st.multiselect(
-    'Choose up to 5 ingredients:',
-    fruit_display_list,
-    max_selections=5
+    "Choose up to 5 ingredients:",
+    options=fruit_options,
+    max_selections=5,
 )
 
-# Order submission section
-if ingredients_list and customer_name:
-    ingredients_string = ' '.join(ingredients_list)
+# Submit order
+if st.button("Submit Order"):
+    if not customer_name:
+        st.info("✍️ Please enter your name before submitting your order.")
+    elif not ingredients_list:
+        st.info("👆 Choose some ingredients before submitting your order.")
+    else:
+        ingredients_string = ", ".join(ingredients_list)
 
-    my_insert_stmt = f"""
-        INSERT INTO smoothies.public.orders (ingredients, name_on_order)
-        VALUES ('{ingredients_string}', '{customer_name}')
-    """
+        # Escape single quotes for SQL
+        safe_name = customer_name.replace("'", "''")
+        safe_ingredients = ingredients_string.replace("'", "''")
 
-    if st.button('Submit Order'):
-        session.sql(my_insert_stmt).collect()
-        st.success(f"✅ Your Smoothie is ordered, {customer_name}!")
+        insert_sql = f"""
+            INSERT INTO smoothies.public.orders (ingredients, name_on_order)
+            VALUES ('{safe_ingredients}', '{safe_name}')
+        """
 
-elif customer_name and not ingredients_list:
-    st.info("👆 Choose some ingredients before submitting your order.")
-elif ingredients_list and not customer_name:
-    st.info("✍️ Please enter your name before submitting your order.")
+        try:
+            session.sql(insert_sql).collect()
+            st.success(f"✅ Your Smoothie is ordered, {customer_name}!")
+        except Exception as e:
+            st.error(f"Order failed: {e}")
 
-# Nutrition info display section
+# Show nutrition info for selected fruits
 if ingredients_list:
-    for fruit_display_name in ingredients_list:
-        # Use SEARCH_ON value for API, fallback to FRUIT_NAME if missing
-        search_term = search_lookup.get(fruit_display_name, fruit_display_name)
+    st.subheader("Nutrition info")
+    records = []
+    for fruit in ingredients_list:
+        try:
+            resp = requests.get(
+                f"https://my.smoothiefroot.com/api/fruit/{fruit.lower()}",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Normalize to a flat dict and include the fruit name
+            if isinstance(data, dict):
+                data["fruit"] = fruit
+                records.append(data)
+            elif isinstance(data, list) and data:
+                d = data[0]
+                if isinstance(d, dict):
+                    d["fruit"] = fruit
+                    records.append(d)
+        except Exception as e:
+            st.warning(f"Could not fetch nutrition for {fruit}: {e}")
 
-        st.subheader(f"{fruit_display_name} Nutrition Information")
-
-        response = requests.get(f"https://my.smoothiefroot.com/api/fruit/{search_term.lower()}")
-        if response.status_code == 200:
-            st.dataframe(data=response.json(), use_container_width=True)
-        else:
-            st.warning(f"⚠️ Could not fetch data for {fruit_display_name} (searched for '{search_term}').")
+    if records:
+        st.dataframe(pd.json_normalize(records), use_container_width=True)
+    else:
+        st.write("No nutrition data to display yet.")
